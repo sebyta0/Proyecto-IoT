@@ -35,6 +35,9 @@ Filtro implementado: Media móvil con N = 5. Criterio de elección: Se eligió N
 
 --- GT3 ---
 Código: 
+
+
+
 #include <Arduino.h>
 #include <WiFi.h>
 #include <PubSubClient.h>
@@ -47,6 +50,8 @@ Código:
 // ==========================================================
 // 1. CONFIGURACIÓN RED, MQTT Y HORA (NTP)
 // ==========================================================
+
+
 const char* ssid = "Pichulaperro";
 const char* password = "chaparritoUA";
 const char* mqtt_server = "broker.hivemq.com";
@@ -59,9 +64,13 @@ const char* ntpServer = "pool.ntp.org";
 const long  gmtOffset_sec = -14400;    // Zona Horaria de Chile (ajusta si hay cambio de hora)
 const int   daylightOffset_sec = 3600; 
 
+
 // ==========================================================
 // 2. CONFIGURACIÓN DE PINES
 // ==========================================================
+
+
+
 const int pinAire = 34;         
 const int pinRuidoAnalog = 32;  
 const int pinBoton = 25;        
@@ -71,16 +80,26 @@ const int pinRele = 4;
 #define RELE_ENCENDIDO LOW
 #define RELE_APAGADO HIGH
 
+
 // ==========================================================
 // 3. PANTALLA OLED
 // ==========================================================
+
+
+
 #define SCREEN_WIDTH 128
 #define SCREEN_HEIGHT 64
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
 
+
+
 // ==========================================================
 // 4. CONSTANTES Y FILTROS FÍSICOS (MQ-135)
 // ==========================================================
+
+
+
+
 const float V_REF = 3.3; 
 const float CUENTAS_MAX = 4095.0;
 const float ESCALA_SENSOR = 484.84;  
@@ -114,9 +133,14 @@ float mediana() {
   return copia[muestras_validas / 2];
 }
 
+
+
 // ==========================================================
 // 5. MÁQUINA DE ESTADOS Y TIEMPOS (FSM)
 // ==========================================================
+
+
+
 enum EstadoSistema : uint8_t { CALENTANDO, MONITOREANDO, ALERTA_RUIDO, ALERTA_CO2, ERROR_SEGURO };
 EstadoSistema estadoActual = CALENTANDO;
 
@@ -176,9 +200,14 @@ void reconectarMQTT() {
   }
 }
 
+
+
 // ==========================================================
 // 6. SETUP 
 // ==========================================================
+
+
+
 void setup() {
   Serial.begin(115200);
   
@@ -204,9 +233,14 @@ void setup() {
   tiempoInicioActividad = millis();
 }
 
+
+
 // ==========================================================
 // 7. LOOP PRINCIPAL NO BLOQUEANTE
 // ==========================================================
+
+
+
 void loop() {
   uint32_t ahora = millis();
 
@@ -244,9 +278,15 @@ void loop() {
       tiempoInicioActividad = millis(); 
     }
   } 
+
+
+  
   // --------------------------------------------------------
   // FASE 2: MUESTREO Y ALERTAS (3 MINUTOS)
   // --------------------------------------------------------
+
+
+  
   else {
     reconectarMQTT();
     client.loop();
@@ -363,9 +403,16 @@ void loop() {
     }
   }
 
+
+
+
   // --------------------------------------------------------
   // D. CIERRE DE CICLO Y DEEP SLEEP (NTP)
   // --------------------------------------------------------
+
+
+
+  
   bool terminoCiclo = (estadoActual != CALENTANDO) && (ahora - tiempoInicioActividad >= TIEMPO_ACTIVO_MS);
 
   if (terminoCiclo || leerBotonFuerzaEnvio() || despertarPorBoton) {
