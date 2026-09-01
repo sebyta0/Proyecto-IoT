@@ -502,3 +502,407 @@ void loop() {
     esp_deep_sleep_start();
   }
 }
+
+
+Código Actualizado: 
+#include <Arduino.h>
+#include <WiFi.h>
+#include <PubSubClient.h>
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+#include <esp_sleep.h>
+#include <time.h> 
+
+// ==========================================================
+// 1. CONFIGURACIÓN RED, MQTT Y HORA (NTP)
+// ==========================================================
+const char* ssid = "Pichulaperro";
+const char* password = "chaparritoUA";
+const char* mqtt_server = "broker.hivemq.com";
+const int mqtt_port = 1883;
+
+const char* topico_alerta = "curso/e08/p2/alertas";
+const char* topico_resumen = "curso/e08/p2/nodo1";
+
+const char* ntpServer = "pool.ntp.org";
+const long  gmtOffset_sec = -14400;    
+const int   daylightOffset_sec = 3600; 
+
+// ==========================================================
+// 2. CONFIGURACIÓN DE PINES
+// ==========================================================
+const int pinAire = 34;         
+const int pinRuidoAnalog = 32;  
+const int pinBoton = 25;        
+const int pinLed = 33;          
+const int pinRele = 4;        
+
+#define RELE_ENCENDIDO HIGH
+#define RELE_APAGADO LOW
+
+// ==========================================================
+// 3. PANTALLA OLED
+// ==========================================================
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
+
+// ==========================================================
+// 4. CONSTANTES Y FILTROS FÍSICOS (MQ-135)
+// ==========================================================
+const float V_REF = 3.3; 
+const float CUENTAS_MAX = 4095.0;
+const float ESCALA_SENSOR = 484.84;  
+const float OFFSET_SENSOR = 400.0;   
+const float M_CAL = 1.0; 
+const float B_CAL = 0.0;
+
+const uint8_t MAX_MUESTRAS = 15; 
+float ventana[MAX_MUESTRAS];
+uint8_t muestras_validas = 0;
+uint8_t indice_ventana = 0;
+
+float cuentas_a_fisica(int cuentas) {
+  return ((V_REF * cuentas) / CUENTAS_MAX) * ESCALA_SENSOR + OFFSET_SENSOR;
+}
+
+float aplicar_calibracion(float valor_medido) {
+  return M_CAL * valor_medido + B_CAL;
+}
+
+float mediana() {
+  if (muestras_validas == 0) return OFFSET_SENSOR; 
+  float copia[MAX_MUESTRAS]; 
+  for (uint8_t i = 0; i < muestras_validas; i++) copia[i] = ventana[i];
+  for (uint8_t i = 1; i < muestras_validas; i++) {     
+    float clave = copia[i];
+    int8_t j = i - 1;
+    while (j >= 0 && copia[j] > clave) { copia[j + 1] = copia[j]; j--; }
+    copia[j + 1] = clave;
+  }
+  return copia[muestras_validas / 2];
+}
+
+// ==========================================================
+// 5. MÁQUINA DE ESTADOS Y TIEMPOS (FSM)
+// ==========================================================
+enum EstadoSistema : uint8_t { CALENTANDO, MONITOREANDO, ALERTA_RUIDO, ALERTA_CO2, ERROR_SEGURO };
+EstadoSistema estadoActual = CALENTANDO;
+
+const uint32_t TIEMPO_CALENTAMIENTO_MS = 240000; // 4 minutos de calentamiento
+const uint32_t TIEMPO_ACTIVO_MS = 180000;        // 3 minutos activo
+const uint64_t TIEMPO_DORMIR_US = 3180000000ULL; // 53 minutos de sueño
+
+uint32_t tiempoInicioActividad = 0;
+uint32_t tiempoAnteriorMuestreo = 0;
+uint32_t tiempoAnteriorPantalla = 0;
+uint32_t t_entrada = 0;
+
+bool mostrarRuidoPantalla = true;
+int ruidoActual = 0;
+float aireActual = 0.0;
+
+const int MAX_MUESTRAS_RUIDO = 500; 
+int arregloRuido[MAX_MUESTRAS_RUIDO];
+int contadorMuestras = 0;
+int ruidoMediana = 0;
+
+float co2_maximo = 0.0;
+float co2_minimo = 9999.0;
+int ruido_maximo = 0;
+int ruido_minimo = 9999;
+
+uint8_t lecturasInvalidas = 0; 
+
+RTC_DATA_ATTR bool alertaRuidoEnviada = false;
+RTC_DATA_ATTR bool alertaCO2Enviada = false;
+
+WiFiClient espClient;
+PubSubClient client(espClient);
+
+void cambiar(EstadoSistema e) {
+  estadoActual = e;
+  t_entrada = millis();
+  Serial.printf("[%lu ms] -> estado %u\n", millis(), (unsigned)e);
+}
+
+bool leerBotonFuerzaEnvio() {
+  static uint32_t t_ultimo_boton = 0;
+  if (digitalRead(pinBoton) == HIGH && (millis() - t_ultimo_boton >= 50)) {
+    t_ultimo_boton = millis();
+    return true;
+  }
+  return false;
+}
+
+void reconectarMQTT() {
+  if (!client.connected()) {
+    if (client.connect("ESP32_IoT_Node_grupo1")) {
+      Serial.println("Conectado al Broker MQTT");
+    }
+  }
+}
+
+// ==========================================================
+// 6. SETUP 
+// ==========================================================
+void setup() {
+  Serial.begin(115200);
+  
+  pinMode(pinAire, INPUT);
+  pinMode(pinRuidoAnalog, INPUT);
+  pinMode(pinBoton, INPUT_PULLDOWN);
+  pinMode(pinLed, OUTPUT);
+  pinMode(pinRele, OUTPUT);
+  
+  digitalWrite(pinRele, RELE_ENCENDIDO); 
+
+  // Ya no interceptamos el botón aquí para forzar el sueño.
+  // Si despertó por botón, simplemente iniciará su ciclo de calentamiento normal.
+
+  if(display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
+    display.clearDisplay();
+    display.display();
+  }
+
+  WiFi.mode(WIFI_OFF); 
+  tiempoInicioActividad = millis();
+}
+
+// ==========================================================
+// 7. LOOP PRINCIPAL NO BLOQUEANTE
+// ==========================================================
+void loop() {
+  uint32_t ahora = millis();
+
+  // --------------------------------------------------------
+  // FASE 1: CALENTAMIENTO (4 MINUTOS)
+  // --------------------------------------------------------
+  if (estadoActual == CALENTANDO) {
+    if (ahora - tiempoAnteriorPantalla >= 1000) {
+      tiempoAnteriorPantalla = ahora;
+      int segundosRestantes = (TIEMPO_CALENTAMIENTO_MS - (ahora - tiempoInicioActividad)) / 1000;
+      
+      display.clearDisplay();
+      display.setTextSize(1);
+      display.setTextColor(SSD1306_WHITE);
+      display.setCursor(0, 10);
+      display.println(F("Calentando MQ-135..."));
+      display.println(F("WiFi APAGADO"));
+      display.setTextSize(3);
+      display.setCursor(30, 35);
+      display.print(segundosRestantes);
+      display.display();
+    }
+
+    if (ahora - tiempoInicioActividad >= TIEMPO_CALENTAMIENTO_MS) {
+      display.clearDisplay(); display.setTextSize(1); display.setCursor(0, 20);
+      display.println(F("Conectando WiFi...")); display.display();
+
+      WiFi.mode(WIFI_STA);
+      WiFi.begin(ssid, password);
+      while (WiFi.status() != WL_CONNECTED) { delay(500); }
+      configTime(gmtOffset_sec, daylightOffset_sec, ntpServer); 
+      client.setServer(mqtt_server, mqtt_port);
+
+      cambiar(MONITOREANDO);
+      tiempoInicioActividad = millis(); 
+    }
+  } 
+  // --------------------------------------------------------
+  // FASE 2: MUESTREO Y ALERTAS (3 MINUTOS)
+  // --------------------------------------------------------
+  else {
+    reconectarMQTT();
+    client.loop();
+    
+    if (ahora - tiempoAnteriorMuestreo >= 500) {
+      tiempoAnteriorMuestreo = ahora;
+
+      int max_val = 0;
+      int min_val = 4095;
+      uint32_t inicio_audio = millis();
+      while(millis() - inicio_audio < 50) {
+        int val = analogRead(pinRuidoAnalog);
+        if(val > max_val) max_val = val;
+        if(val < min_val) min_val = val;
+      }
+      int amplitudSonido = max_val - min_val; 
+      
+      int adcAire = analogRead(pinAire);
+
+      if (adcAire <= 10) lecturasInvalidas++;
+      else lecturasInvalidas = 0;
+
+      if (lecturasInvalidas >= 3 && estadoActual != ERROR_SEGURO) {
+        cambiar(ERROR_SEGURO);
+      }
+
+      if (estadoActual != ERROR_SEGURO) {
+        ruidoActual = map(amplitudSonido, 0, 4095, 30, 120);
+
+        if (contadorMuestras < MAX_MUESTRAS_RUIDO) {
+          arregloRuido[contadorMuestras] = ruidoActual;
+          contadorMuestras++;
+        }
+
+        if (ruidoActual > ruido_maximo) ruido_maximo = ruidoActual;
+        if (ruidoActual < ruido_minimo) ruido_minimo = ruidoActual;
+
+        float aireCrudo = aplicar_calibracion(cuentas_a_fisica(adcAire));
+        ventana[indice_ventana] = aireCrudo;
+        indice_ventana = (indice_ventana + 1) % MAX_MUESTRAS;
+        if (muestras_validas < MAX_MUESTRAS) muestras_validas++;
+
+        aireActual = mediana(); 
+
+        if (aireActual > co2_maximo) co2_maximo = aireActual;
+        if (aireActual < co2_minimo) co2_minimo = aireActual;
+
+        if (ruidoActual >= 50) { 
+          if (!alertaRuidoEnviada) {
+            String payloadRuido = "{\"alerta\":\"Ruido\",\"valor\":" + String(ruidoActual) + "}";
+            client.publish(topico_alerta, payloadRuido.c_str());
+            alertaRuidoEnviada = true; 
+          }
+          if (estadoActual != ALERTA_RUIDO) cambiar(ALERTA_RUIDO);
+        } else if (ruidoActual <= 75) {
+          alertaRuidoEnviada = false; 
+        }
+
+        if (aireActual >= 700.0) {
+          if (!alertaCO2Enviada) {
+            client.publish(topico_alerta, "{\"alerta\":\"Aire\",\"valor\":""}"); 
+            alertaCO2Enviada = true; 
+          }
+          if (estadoActual == MONITOREANDO) cambiar(ALERTA_CO2);
+        } else if (aireActual <= 600.0) {
+          alertaCO2Enviada = false; 
+        }
+
+        if (ruidoActual <= 75 && aireActual <= 600.0 && estadoActual != MONITOREANDO) {
+          cambiar(MONITOREANDO);
+        }
+      }
+    }
+
+    if (ahora - tiempoAnteriorPantalla >= 2000) {
+      tiempoAnteriorPantalla = ahora;
+      
+      display.clearDisplay(); 
+      display.setTextSize(2); 
+      display.setCursor(0, 10);
+      
+      if (estadoActual == ERROR_SEGURO) {
+        display.println(F("ERROR!")); 
+        display.setTextSize(1); 
+        display.println(F("Cable Suelto"));
+      } else {
+        mostrarRuidoPantalla = !mostrarRuidoPantalla;
+        if (mostrarRuidoPantalla) {
+          display.println(F("RUIDO:"));
+          display.print(ruidoActual); display.println(F(" dB"));
+        } else {
+          display.println(F("AIRE PPM:"));
+          display.println(aireActual, 1);
+        }
+      }
+      display.display();
+    }
+
+    switch (estadoActual) {
+      case MONITOREANDO:
+        digitalWrite(pinLed, LOW);
+        break;
+      case ALERTA_RUIDO:
+      case ALERTA_CO2:
+        digitalWrite(pinLed, HIGH);
+        break;
+      case ERROR_SEGURO:
+        digitalWrite(pinRele, RELE_APAGADO); 
+        digitalWrite(pinLed, HIGH); 
+        break;
+      case CALENTANDO:
+        break; 
+    }
+  }
+
+  // --------------------------------------------------------
+  // D. CIERRE DE CICLO Y DEEP SLEEP (NTP)
+  // --------------------------------------------------------
+  ahora = millis(); 
+  bool terminoCiclo = (estadoActual != CALENTANDO) && (ahora - tiempoInicioActividad >= TIEMPO_ACTIVO_MS);
+
+  if (terminoCiclo || leerBotonFuerzaEnvio()) {
+    
+    if (WiFi.status() != WL_CONNECTED) {
+      display.clearDisplay(); display.setCursor(0, 10); display.setTextSize(1);
+      display.print(F("Conectando...")); display.display();
+      WiFi.mode(WIFI_STA); WiFi.begin(ssid, password);
+      while (WiFi.status() != WL_CONNECTED) { delay(100); }
+      configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
+      client.setServer(mqtt_server, mqtt_port); reconectarMQTT();
+    }
+
+    if (contadorMuestras > 0) {
+      for (int i = 0; i < contadorMuestras - 1; i++) {
+        for (int j = 0; j < contadorMuestras - i - 1; j++) {
+          if (arregloRuido[j] > arregloRuido[j + 1]) {
+            int temporal = arregloRuido[j];
+            arregloRuido[j] = arregloRuido[j + 1];
+            arregloRuido[j + 1] = temporal;
+          }
+        }
+      }
+      int mitad = contadorMuestras / 2;
+      if (contadorMuestras % 2 == 0) { ruidoMediana = (arregloRuido[mitad - 1] + arregloRuido[mitad]) / 2; } 
+      else { ruidoMediana = arregloRuido[mitad]; }
+    } else { ruidoMediana = 0; }
+    contadorMuestras = 0; 
+    
+    // FILTRO DE SEGURIDAD: Reemplaza los 9999 por 0 si el ciclo se forzó antes de capturar datos
+    float min_co2_final = (co2_minimo == 9999.0) ? 0.0 : co2_minimo;
+    int min_ruido_final = (ruido_minimo == 9999) ? 0 : ruido_minimo;
+
+    String payload = "{\"mediana_co2\":" + String(aireActual) + 
+                     ",\"max_co2\":" + String(co2_maximo) + 
+                     ",\"min_co2\":" + String(min_co2_final) + 
+                     ",\"mediana_ruido\":" + String(ruidoMediana) + 
+                     ",\"max_ruido\":" + String(ruido_maximo) + 
+                     ",\"min_ruido\":" + String(min_ruido_final) + "}";
+                     
+    client.publish(topico_resumen, payload.c_str());
+    delay(500); 
+
+    digitalWrite(pinRele, RELE_APAGADO); 
+    digitalWrite(pinLed, LOW);
+    
+    struct tm timeinfo;
+    String textoDespertar = "--:--"; 
+    if (getLocalTime(&timeinfo)) {
+      time_t ahora_epoch;
+      time(&ahora_epoch); 
+      ahora_epoch += (53 * 60); 
+      struct tm *horaFutura = localtime(&ahora_epoch); 
+      char buffer[6]; 
+      sprintf(buffer, "%02d:%02d", horaFutura->tm_hour, horaFutura->tm_min);
+      textoDespertar = String(buffer);
+    }
+
+    display.clearDisplay(); display.setTextSize(1); display.setCursor(0, 10);
+    display.println(F("Datos Enviados!")); display.println(F("Despierta a las:"));
+    display.setTextSize(3); display.setCursor(20, 35); display.print(textoDespertar);
+    display.display();
+    
+    delay(4000); 
+    display.ssd1306_command(SSD1306_DISPLAYOFF); 
+
+    client.disconnect();
+    WiFi.disconnect(true);
+
+    esp_sleep_enable_ext1_wakeup(1ULL << pinBoton, ESP_EXT1_WAKEUP_ANY_HIGH);
+    esp_sleep_enable_timer_wakeup(TIEMPO_DORMIR_US);
+    esp_deep_sleep_start();
+  }
+}
