@@ -77,8 +77,8 @@ const int pinBoton = 25;
 const int pinLed = 33;          
 const int pinRele = 4;        
 
-#define RELE_ENCENDIDO LOW
-#define RELE_APAGADO HIGH
+#define RELE_ENCENDIDO HIGH
+#define RELE_APAGADO LOW
 
 
 // ==========================================================
