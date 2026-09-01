@@ -43,7 +43,7 @@ Filtro implementado: Media móvil con N = 5. Criterio de elección: Se eligió N
 
 Video de circuito en funcionamiento: 
 
-https://drive.google.com/file/d/1pJf0zCyYcQ-HjyvcMk9zZ4_aJ8U5O6kv/view?usp=sharing 
+https://drive.google.com/file/d/1pJf0zCyYcQ-HjyvcMk9zZ4_aJ8U5O6kv/view?usp=sharing
 
 
 Código: 
