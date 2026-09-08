@@ -308,7 +308,8 @@ esp_sleep_enable_timer_wakeup(TIEMPO_DORMIR_US);
 esp_deep_sleep_start();
 } }
 
--------------------- Código Actualizado 2 -------------------- #include <Arduino.h> #include <WiFi.h> #include <PubSubClient.h> #include <Wire.h> #include <Adafruit_GFX.h> #include <Adafruit_SSD1306.h> #include <esp_sleep.h> #include <time.h>
+-------------------- Código Actualizado 2 -------------------- 
+#include <Arduino.h> #include <WiFi.h> #include <PubSubClient.h> #include <Wire.h> #include <Adafruit_GFX.h> #include <Adafruit_SSD1306.h> #include <esp_sleep.h> #include <time.h>
 
 // ========================================================== // 1. CONFIGURACIÓN RED, MQTT Y HORA (NTP) // ========================================================== const char* ssid = "Pichulaperro"; const char* password = "chaparritoUA"; const char* mqtt_server = "broker.hivemq.com"; const int mqtt_port = 1883;
 
