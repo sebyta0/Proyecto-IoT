@@ -1,0 +1,179 @@
+Codigo 1:
+import adsk.core, adsk.fusion, traceback
+
+def run(context):
+    ui = None
+    try:
+        app = adsk.core.Application.get()
+        ui = app.userInterface
+        design = app.activeProduct
+        rootComp = design.rootComponent
+        sketches = rootComp.sketches
+        extrudes = rootComp.features.extrudeFeatures
+        planes = rootComp.constructionPlanes
+
+        def sketch_rect(sketch, x1, y1, z1, x2, y2, z2):
+            p1 = sketch.modelToSketchSpace(adsk.core.Point3D.create(x1, y1, z1))
+            p2 = sketch.modelToSketchSpace(adsk.core.Point3D.create(x2, y2, z2))
+            sketch.sketchCurves.sketchLines.addTwoPointRectangle(p1, p2)
+
+        def sketch_circle(sketch, x, y, z, r):
+            p = sketch.modelToSketchSpace(adsk.core.Point3D.create(x, y, z))
+            sketch.sketchCurves.sketchCircles.addByCenterRadius(p, r)
+
+        # 1. CAJA PRINCIPAL (14x14x14 cm)
+        xyPlane = rootComp.xYConstructionPlane
+        baseSketch = sketches.add(xyPlane)
+        baseSketch.sketchCurves.sketchLines.addTwoPointRectangle(
+            adsk.core.Point3D.create(0, 0, 0), adsk.core.Point3D.create(14.0, 14.0, 0))
+        baseExt = extrudes.createInput(baseSketch.profiles.item(0), adsk.fusion.FeatureOperations.NewBodyFeatureOperation)
+        baseExt.setDistanceExtent(False, adsk.core.ValueInput.createByReal(14.0))
+        caja = extrudes.add(baseExt)
+        cajaBody = caja.bodies.item(0)
+        cajaBody.name = "Carcasa_Principal"
+
+        # 2. VACIADO (ABIERTO EN EL FRENTE X=0)
+        faceToShell = None
+        for face in cajaBody.faces:
+            _, normal = face.evaluator.getNormalAtPoint(face.pointOnFace)
+            if abs(normal.x + 1.0) < 0.01:
+                faceToShell = face
+                break
+
+        if faceToShell:
+            faceColl = adsk.core.ObjectCollection.create()
+            faceColl.add(faceToShell)
+            shellInput = rootComp.features.shellFeatures.createInput(faceColl, False)
+            shellInput.insideThickness = adsk.core.ValueInput.createByReal(0.3)
+            rootComp.features.shellFeatures.add(shellInput)
+
+        # 3. PLATAFORMAS EN EL PISO (Z=0.3 cm)
+        floorPlaneInput = planes.createInput()
+        floorPlaneInput.setByOffset(xyPlane, adsk.core.ValueInput.createByReal(0.3))
+        floorPlane = planes.add(floorPlaneInput)
+        floorSketch = sketches.add(floorPlane)
+        
+        floorSketch.sketchCurves.sketchLines.addTwoPointRectangle(adsk.core.Point3D.create(0.5, 4.9, 0), adsk.core.Point3D.create(8.1, 9.3, 0))
+        floorSketch.sketchCurves.sketchLines.addTwoPointRectangle(adsk.core.Point3D.create(9.0, 1.0, 0), adsk.core.Point3D.create(13.4, 2.3, 0))
+        floorSketch.sketchCurves.sketchLines.addTwoPointRectangle(adsk.core.Point3D.create(9.0, 3.0, 0), adsk.core.Point3D.create(13.3, 5.3, 0))
+
+        floorProfs = adsk.core.ObjectCollection.create()
+        for i in range(floorSketch.profiles.count): floorProfs.add(floorSketch.profiles.item(i))
+        floorExtInp = extrudes.createInput(floorProfs, adsk.fusion.FeatureOperations.JoinFeatureOperation)
+        floorExtInp.setDistanceExtent(False, adsk.core.ValueInput.createByReal(0.2))
+        extrudes.add(floorExtInp)
+
+        # 4. RIELES LATERALES (Z=6.0 cm)
+        railPlaneInput = planes.createInput()
+        railPlaneInput.setByOffset(xyPlane, adsk.core.ValueInput.createByReal(6.0))
+        railPlane = planes.add(railPlaneInput)
+        railSketch = sketches.add(railPlane)
+        
+        railSketch.sketchCurves.sketchLines.addTwoPointRectangle(adsk.core.Point3D.create(0.3, 0.3, 0), adsk.core.Point3D.create(13.7, 0.6, 0))
+        railSketch.sketchCurves.sketchLines.addTwoPointRectangle(adsk.core.Point3D.create(0.3, 13.4, 0), adsk.core.Point3D.create(13.7, 13.7, 0))
+
+        railProfs = adsk.core.ObjectCollection.create()
+        for i in range(railSketch.profiles.count): railProfs.add(railSketch.profiles.item(i))
+        railExtInp = extrudes.createInput(railProfs, adsk.fusion.FeatureOperations.JoinFeatureOperation)
+        railExtInp.setDistanceExtent(False, adsk.core.ValueInput.createByReal(0.4))
+        extrudes.add(railExtInp)
+
+        # 5. BANDEJA DESLIZANTE (Z=6.4 cm)
+        trayPlaneInput = planes.createInput()
+        trayPlaneInput.setByOffset(xyPlane, adsk.core.ValueInput.createByReal(6.4))
+        trayPlane = planes.add(trayPlaneInput)
+        traySketch = sketches.add(trayPlane)
+        
+        traySketch.sketchCurves.sketchLines.addTwoPointRectangle(adsk.core.Point3D.create(0.35, 0.3, 0), adsk.core.Point3D.create(13.65, 13.7, 0))
+        trayExtInp = extrudes.createInput(traySketch.profiles.item(0), adsk.fusion.FeatureOperations.NewBodyFeatureOperation)
+        trayExtInp.setDistanceExtent(False, adsk.core.ValueInput.createByReal(0.2))
+        trayObj = extrudes.add(trayExtInp)
+        trayBody = trayObj.bodies.item(0)
+        trayBody.name = "Bandeja_Deslizante"
+
+        platPlaneInput = planes.createInput()
+        platPlaneInput.setByOffset(xyPlane, adsk.core.ValueInput.createByReal(6.6))
+        platPlane = planes.add(platPlaneInput)
+        platSketch = sketches.add(platPlane)
+        
+        platSketch.sketchCurves.sketchLines.addTwoPointRectangle(adsk.core.Point3D.create(0.5, 0.5, 0), adsk.core.Point3D.create(8.3, 6.9, 0))
+        platSketch.sketchCurves.sketchLines.addTwoPointRectangle(adsk.core.Point3D.create(0.5, 7.5, 0), adsk.core.Point3D.create(8.8, 12.9, 0))
+
+        platProfs = adsk.core.ObjectCollection.create()
+        for i in range(platSketch.profiles.count): platProfs.add(platSketch.profiles.item(i))
+        platExtInp = extrudes.createInput(platProfs, adsk.fusion.FeatureOperations.JoinFeatureOperation)
+        platExtInp.participantBodies = [trayBody]
+        platExtInp.setDistanceExtent(False, adsk.core.ValueInput.createByReal(0.2))
+        extrudes.add(platExtInp)
+
+        # 6. TECHO CON TORNILLOS DE SENSORES
+        roofPlaneInput = planes.createInput()
+        roofPlaneInput.setByOffset(xyPlane, adsk.core.ValueInput.createByReal(14.0))
+        roofPlane = planes.add(roofPlaneInput)
+        roofSketch = sketches.add(roofPlane)
+        
+        sketch_circle(roofSketch, 4.5, 10.5, 14.0, 0.8) 
+        sketch_circle(roofSketch, 3.7, 9.1, 14.0, 0.15) 
+        sketch_circle(roofSketch, 5.3, 9.1, 14.0, 0.15) 
+        sketch_circle(roofSketch, 3.7, 11.9, 14.0, 0.15) 
+        sketch_circle(roofSketch, 5.3, 11.9, 14.0, 0.15) 
+
+        sketch_circle(roofSketch, 9.5, 10.5, 14.0, 0.55) 
+        sketch_circle(roofSketch, 9.5, 9.0, 14.0, 0.15)  
+
+        roofProfs = adsk.core.ObjectCollection.create()
+        for i in range(roofSketch.profiles.count): roofProfs.add(roofSketch.profiles.item(i))
+        roofCut = extrudes.createInput(roofProfs, adsk.fusion.FeatureOperations.CutFeatureOperation)
+        roofCut.setSymmetricExtent(adsk.core.ValueInput.createByReal(1.0), True) 
+        extrudes.add(roofCut)
+
+        # 7. PANTALLA OLED CENTRADA (X=14.0, Y=7.0, Z=10.5)
+        yzPlane = rootComp.yZConstructionPlane
+        oledPlaneInput = planes.createInput()
+        oledPlaneInput.setByOffset(yzPlane, adsk.core.ValueInput.createByReal(14.0))
+        oledPlane = planes.add(oledPlaneInput)
+        oledSketch = sketches.add(oledPlane)
+        
+        sketch_rect(oledSketch, 14.0, 7.0 - 1.3, 10.5 - 0.75, 14.0, 7.0 + 1.3, 10.5 + 0.75)
+        sketch_circle(oledSketch, 14.0, 7.0 - 1.175, 10.5 - 1.175, 0.15)
+        sketch_circle(oledSketch, 14.0, 7.0 + 1.175, 10.5 - 1.175, 0.15)
+        sketch_circle(oledSketch, 14.0, 7.0 - 1.175, 10.5 + 1.175, 0.15)
+        sketch_circle(oledSketch, 14.0, 7.0 + 1.175, 10.5 + 1.175, 0.15)
+
+        oledProfs = adsk.core.ObjectCollection.create()
+        for i in range(oledSketch.profiles.count): oledProfs.add(oledSketch.profiles.item(i))
+        oledCut = extrudes.createInput(oledProfs, adsk.fusion.FeatureOperations.CutFeatureOperation)
+        oledCut.setSymmetricExtent(adsk.core.ValueInput.createByReal(1.0), True) 
+        extrudes.add(oledCut)
+
+        # 8. TAPA FRONTAL UNificada (Una sola pieza limpia)
+        tapaPlaneInput = planes.createInput()
+        tapaPlaneInput.setByOffset(yzPlane, adsk.core.ValueInput.createByReal(-5.15))
+        tapaPlane = planes.add(tapaPlaneInput)
+        tapaSketch = sketches.add(tapaPlane)
+        
+        sketch_rect(tapaSketch, -5.15, 0.0, 0.0, -5.15, 14.0, 14.0)
+        
+        tapaExtInp = extrudes.createInput(tapaSketch.profiles.item(0), adsk.fusion.FeatureOperations.NewBodyFeatureOperation)
+        tapaExtInp.setSymmetricExtent(adsk.core.ValueInput.createByReal(0.15), True) 
+        tapaObj = extrudes.add(tapaExtInp)
+        tapaBody = tapaObj.bodies.item(0)
+        tapaBody.name = "Tapa_Desmontable"
+
+        labioPlaneInput = planes.createInput()
+        labioPlaneInput.setByOffset(yzPlane, adsk.core.ValueInput.createByReal(-4.9))
+        labioPlane = planes.add(labioPlaneInput)
+        labioSketch = sketches.add(labioPlane)
+        
+        sketch_rect(labioSketch, -4.9, 0.35, 0.35, -4.9, 13.65, 13.65)
+        
+        labioExtInp = extrudes.createInput(labioSketch.profiles.item(0), adsk.fusion.FeatureOperations.JoinFeatureOperation)
+        labioExtInp.setSymmetricExtent(adsk.core.ValueInput.createByReal(0.1), True) 
+        labioExtInp.participantBodies = [tapaBody]
+        extrudes.add(labioExtInp)
+
+        ui.messageBox('¡Tapa unificada y lista! Ya no hay cuerpos sobrantes.')
+
+    except:
+        if ui:
+            ui.messageBox('Error:\n{}'.format(traceback.format_exc()))
