@@ -177,3 +177,271 @@ def run(context):
     except:
         if ui:
             ui.messageBox('Error:\n{}'.format(traceback.format_exc()))
+
+
+Codigo 2:
+import adsk.core, adsk.fusion, traceback
+
+def run(context):
+    ui = None
+    try:
+        app = adsk.core.Application.get()
+        ui = app.userInterface
+        design = app.activeProduct
+        rootComp = design.rootComponent
+        sketches = rootComp.sketches
+        extrudes = rootComp.features.extrudeFeatures
+        planes = rootComp.constructionPlanes
+
+        # ==================================================================
+        # FUNCIONES AUXILIARES
+        # ==================================================================
+        def sketch_rect(sketch, x1, y1, z1, x2, y2, z2):
+            p1 = sketch.modelToSketchSpace(adsk.core.Point3D.create(x1, y1, z1))
+            p2 = sketch.modelToSketchSpace(adsk.core.Point3D.create(x2, y2, z2))
+            sketch.sketchCurves.sketchLines.addTwoPointRectangle(p1, p2)
+
+        def sketch_circle(sketch, x, y, z, r):
+            p = sketch.modelToSketchSpace(adsk.core.Point3D.create(x, y, z))
+            sketch.sketchCurves.sketchCircles.addByCenterRadius(p, r)
+
+        def create_encaje(plane, cx, cy, inner_w, inner_l, z_offset, base_h, wall_h, join_body):
+            """
+            Crea una cuna (encaje completo) con una base sólida y muros perimetrales
+            para alojar módulos a medida.
+            """
+            wall_thick = 0.2
+            outer_w = inner_w + 2 * wall_thick
+            outer_l = inner_l + 2 * wall_thick
+            
+            # 1. Base de la cuna (plataforma elevada)
+            baseSketch = sketches.add(plane)
+            sketch_rect(baseSketch, cx - outer_w/2, cy - outer_l/2, z_offset, cx + outer_w/2, cy + outer_l/2, z_offset)
+            baseExt = extrudes.createInput(baseSketch.profiles.item(0), adsk.fusion.FeatureOperations.JoinFeatureOperation)
+            baseExt.setDistanceExtent(False, adsk.core.ValueInput.createByReal(base_h))
+            baseExt.participantBodies = [join_body]
+            extrudes.add(baseExt)
+            
+            # 2. Muros perimetrales
+            wallSketch = sketches.add(plane)
+            sketch_rect(wallSketch, cx - outer_w/2, cy - outer_l/2, z_offset, cx + outer_w/2, cy + outer_l/2, z_offset) # Exterior
+            sketch_rect(wallSketch, cx - inner_w/2, cy - inner_l/2, z_offset, cx + inner_w/2, cy + inner_l/2, z_offset) # Interior
+            
+            wallProfile = None
+            for i in range(wallSketch.profiles.count):
+                prof = wallSketch.profiles.item(i)
+                if prof.profileLoops.count == 2:
+                    wallProfile = prof
+                    break
+                    
+            if wallProfile:
+                wallExt = extrudes.createInput(wallProfile, adsk.fusion.FeatureOperations.JoinFeatureOperation)
+                # La altura del muro parte de z_offset y sube base_h + wall_h
+                wallExt.setDistanceExtent(False, adsk.core.ValueInput.createByReal(base_h + wall_h))
+                wallExt.participantBodies = [join_body]
+                extrudes.add(wallExt)
+
+        # ==================================================================
+        # 1. CAJA PRINCIPAL Y VACIADO
+        # ==================================================================
+        xyPlane = rootComp.xYConstructionPlane
+        baseSketch = sketches.add(xyPlane)
+        baseSketch.sketchCurves.sketchLines.addTwoPointRectangle(
+            adsk.core.Point3D.create(0, 0, 0), adsk.core.Point3D.create(14.0, 14.0, 0))
+        baseExt = extrudes.createInput(baseSketch.profiles.item(0), adsk.fusion.FeatureOperations.NewBodyFeatureOperation)
+        baseExt.setDistanceExtent(False, adsk.core.ValueInput.createByReal(14.0))
+        caja = extrudes.add(baseExt)
+        cajaBody = caja.bodies.item(0)
+        cajaBody.name = "Carcasa_Principal"
+
+        faceToShell = None
+        for face in cajaBody.faces:
+            _, normal = face.evaluator.getNormalAtPoint(face.pointOnFace)
+            if abs(normal.x + 1.0) < 0.01:
+                faceToShell = face
+                break
+
+        if faceToShell:
+            faceColl = adsk.core.ObjectCollection.create()
+            faceColl.add(faceToShell)
+            shellInput = rootComp.features.shellFeatures.createInput(faceColl, False)
+            shellInput.insideThickness = adsk.core.ValueInput.createByReal(0.3)
+            rootComp.features.shellFeatures.add(shellInput)
+
+        # ==================================================================
+        # 2. PISO (Z = 0.3 cm) - ENCAJES PARA POTENCIA
+        # ==================================================================
+        floorPlaneInput = planes.createInput()
+        floorPlaneInput.setByOffset(xyPlane, adsk.core.ValueInput.createByReal(0.3))
+        floorPlane = planes.add(floorPlaneInput)
+
+        # Portapilas 18650 (Frontal)
+        create_encaje(floorPlane, cx=2.8, cy=7.0, inner_w=4.2, inner_l=7.6, z_offset=0.3, base_h=0.2, wall_h=0.4, join_body=cajaBody)
+
+        # Módulo Relé (Trasera Izquierda)
+        create_encaje(floorPlane, cx=10.0, cy=3.5, inner_w=5.0, inner_l=2.6, z_offset=0.3, base_h=0.2, wall_h=0.3, join_body=cajaBody)
+
+        # LM2596 Step-down (Trasera Derecha)
+        create_encaje(floorPlane, cx=10.0, cy=10.5, inner_w=4.3, inner_l=2.1, z_offset=0.3, base_h=0.2, wall_h=0.3, join_body=cajaBody)
+
+        # ==================================================================
+        # 3. RIELES LATERALES (Z = 6.0 cm)
+        # ==================================================================
+        railPlaneInput = planes.createInput()
+        railPlaneInput.setByOffset(xyPlane, adsk.core.ValueInput.createByReal(6.0))
+        railPlane = planes.add(railPlaneInput)
+        railSketch = sketches.add(railPlane)
+
+        railSketch.sketchCurves.sketchLines.addTwoPointRectangle(adsk.core.Point3D.create(0.3, 0.3, 0), adsk.core.Point3D.create(13.7, 0.6, 0))
+        railSketch.sketchCurves.sketchLines.addTwoPointRectangle(adsk.core.Point3D.create(0.3, 13.4, 0), adsk.core.Point3D.create(13.7, 13.7, 0))
+
+        railProfs = adsk.core.ObjectCollection.create()
+        for i in range(railSketch.profiles.count): railProfs.add(railSketch.profiles.item(i))
+        railExtInp = extrudes.createInput(railProfs, adsk.fusion.FeatureOperations.JoinFeatureOperation)
+        railExtInp.setDistanceExtent(False, adsk.core.ValueInput.createByReal(0.4))
+        extrudes.add(railExtInp)
+
+        # ==================================================================
+        # 4. BANDEJA DESLIZANTE Y PASACABLES (Z = 6.4 cm)
+        # ==================================================================
+        trayPlaneInput = planes.createInput()
+        trayPlaneInput.setByOffset(xyPlane, adsk.core.ValueInput.createByReal(6.4))
+        trayPlane = planes.add(trayPlaneInput)
+        traySketch = sketches.add(trayPlane)
+
+        traySketch.sketchCurves.sketchLines.addTwoPointRectangle(adsk.core.Point3D.create(0.35, 0.3, 0), adsk.core.Point3D.create(13.65, 13.7, 0))
+        trayExtInp = extrudes.createInput(traySketch.profiles.item(0), adsk.fusion.FeatureOperations.NewBodyFeatureOperation)
+        trayExtInp.setDistanceExtent(False, adsk.core.ValueInput.createByReal(0.2))
+        trayObj = extrudes.add(trayExtInp)
+        trayBody = trayObj.bodies.item(0)
+        trayBody.name = "Bandeja_Deslizante"
+
+        # Pasacables (Centro-Trasero)
+        pasacablesSketch = sketches.add(trayPlane)
+        sketch_rect(pasacablesSketch, 10.0, 6.0, 6.4, 13.0, 8.0, 6.4) # 3.0 x 2.0 cm en cx=11.5, cy=7.0
+        pasacablesCutInp = extrudes.createInput(pasacablesSketch.profiles.item(0), adsk.fusion.FeatureOperations.CutFeatureOperation)
+        pasacablesCutInp.participantBodies = [trayBody]
+        pasacablesCutInp.setSymmetricExtent(adsk.core.ValueInput.createByReal(0.4), True)
+        extrudes.add(pasacablesCutInp)
+
+        # ==================================================================
+        # 5. ENCAJES EN LA BANDEJA (Z = 6.6 cm) - ESP32 y PROTOBOARD
+        # ==================================================================
+        platPlaneInput = planes.createInput()
+        platPlaneInput.setByOffset(xyPlane, adsk.core.ValueInput.createByReal(6.6))
+        platPlane = planes.add(platPlaneInput)
+
+        # Encaje Protoboard (Media placa) - Lado izquierdo de la bandeja
+        create_encaje(platPlane, cx=5.0, cy=4.0, inner_w=8.4, inner_l=5.6, z_offset=6.6, base_h=0.2, wall_h=0.3, join_body=trayBody)
+
+        # Encaje ESP32 (Placa suelta) - Lado derecho de la bandeja
+        create_encaje(platPlane, cx=5.0, cy=10.0, inner_w=5.5, inner_l=2.8, z_offset=6.6, base_h=0.2, wall_h=0.3, join_body=trayBody)
+
+        # ==================================================================
+        # 6. TECHO Y SOPORTE LED (Z = 14.0 cm)
+        # ==================================================================
+        roofPlaneInput = planes.createInput()
+        roofPlaneInput.setByOffset(xyPlane, adsk.core.ValueInput.createByReal(14.0))
+        roofPlane = planes.add(roofPlaneInput)
+        roofSketch = sketches.add(roofPlane)
+
+        # Cortes Sensores
+        sketch_circle(roofSketch, 4.5, 10.5, 14.0, 0.8)
+        sketch_circle(roofSketch, 3.7, 9.1, 14.0, 0.15)
+        sketch_circle(roofSketch, 5.3, 9.1, 14.0, 0.15)
+        sketch_circle(roofSketch, 3.7, 11.9, 14.0, 0.15)
+        sketch_circle(roofSketch, 5.3, 11.9, 14.0, 0.15)
+        sketch_circle(roofSketch, 9.5, 10.5, 14.0, 0.55)
+        sketch_circle(roofSketch, 9.5, 9.0, 14.0, 0.15)
+        
+        # Corte LED
+        sketch_circle(roofSketch, 3.0, 7.0, 14.0, 0.25)
+
+        roofProfs = adsk.core.ObjectCollection.create()
+        for i in range(roofSketch.profiles.count): roofProfs.add(roofSketch.profiles.item(i))
+        roofCut = extrudes.createInput(roofProfs, adsk.fusion.FeatureOperations.CutFeatureOperation)
+        roofCut.setSymmetricExtent(adsk.core.ValueInput.createByReal(1.0), True)
+        extrudes.add(roofCut)
+
+        # Tubo interior LED
+        ledPlaneInput = planes.createInput()
+        ledPlaneInput.setByOffset(xyPlane, adsk.core.ValueInput.createByReal(13.7))
+        ledPlane = planes.add(ledPlaneInput)
+        ledSketch = sketches.add(ledPlane)
+        
+        sketch_circle(ledSketch, 3.0, 7.0, 13.7, 0.45)
+        sketch_circle(ledSketch, 3.0, 7.0, 13.7, 0.30)
+        
+        ledProfile = None
+        for i in range(ledSketch.profiles.count):
+            prof = ledSketch.profiles.item(i)
+            if prof.profileLoops.count == 2:
+                ledProfile = prof
+                break
+        
+        if ledProfile:
+            ledExtInp = extrudes.createInput(ledProfile, adsk.fusion.FeatureOperations.JoinFeatureOperation)
+            ledExtInp.participantBodies = [cajaBody]
+            ledExtInp.setDistanceExtent(False, adsk.core.ValueInput.createByReal(-0.6))
+            extrudes.add(ledExtInp)
+
+        # ==================================================================
+        # 7. PANTALLA OLED 0.96" (X = 14.0 cm)
+        # ==================================================================
+        yzPlane = rootComp.yZConstructionPlane
+        oledPlaneInput = planes.createInput()
+        oledPlaneInput.setByOffset(yzPlane, adsk.core.ValueInput.createByReal(14.0))
+        oledPlane = planes.add(oledPlaneInput)
+        oledSketch = sketches.add(oledPlane)
+
+        sketch_rect(oledSketch, 14.0, 7.0 - 1.3, 10.5 - 0.75, 14.0, 7.0 + 1.3, 10.5 + 0.75)
+        sketch_circle(oledSketch, 14.0, 7.0 - 1.175, 10.5 - 1.175, 0.15)
+        sketch_circle(oledSketch, 14.0, 7.0 + 1.175, 10.5 - 1.175, 0.15)
+        sketch_circle(oledSketch, 14.0, 7.0 - 1.175, 10.5 + 1.175, 0.15)
+        sketch_circle(oledSketch, 14.0, 7.0 + 1.175, 10.5 + 1.175, 0.15)
+
+        oledProfs = adsk.core.ObjectCollection.create()
+        for i in range(oledSketch.profiles.count): oledProfs.add(oledSketch.profiles.item(i))
+        oledCut = extrudes.createInput(oledProfs, adsk.fusion.FeatureOperations.CutFeatureOperation)
+        oledCut.setSymmetricExtent(adsk.core.ValueInput.createByReal(1.0), True)
+        extrudes.add(oledCut)
+
+        # ==================================================================
+        # 8. TAPA DESMONTABLE 
+        # ==================================================================
+        TAPA_OFFSET_X = 16.0
+
+        tapaSketch = sketches.add(xyPlane)
+        sketch_rect(tapaSketch, TAPA_OFFSET_X + 0.0, 0.0, 0.0, TAPA_OFFSET_X + 14.0, 14.0, 0.0)
+
+        tapaExtInp = extrudes.createInput(tapaSketch.profiles.item(0), adsk.fusion.FeatureOperations.NewBodyFeatureOperation)
+        tapaExtInp.setSymmetricExtent(adsk.core.ValueInput.createByReal(0.15), True)
+        tapaObj = extrudes.add(tapaExtInp)
+        tapaBody = tapaObj.bodies.item(0)
+        tapaBody.name = "Tapa_Desmontable"
+
+        TOL = 0.03
+        labio_min = 0.3 + TOL      
+        labio_max = 13.7 - TOL     
+        LABIO_HEIGHT = 0.3
+
+        labioPlaneInput = planes.createInput()
+        labioPlaneInput.setByOffset(xyPlane, adsk.core.ValueInput.createByReal(0.15 + LABIO_HEIGHT / 2))
+        labioPlane = planes.add(labioPlaneInput)
+        labioSketch = sketches.add(labioPlane)
+
+        sketch_rect(
+            labioSketch,
+            TAPA_OFFSET_X + labio_min, labio_min, 0.15 + LABIO_HEIGHT / 2,
+            TAPA_OFFSET_X + labio_max, labio_max, 0.15 + LABIO_HEIGHT / 2)
+
+        labioExtInp = extrudes.createInput(labioSketch.profiles.item(0), adsk.fusion.FeatureOperations.JoinFeatureOperation)
+        labioExtInp.setSymmetricExtent(adsk.core.ValueInput.createByReal(LABIO_HEIGHT / 2), True)
+        labioExtInp.participantBodies = [tapaBody]
+        extrudes.add(labioExtInp)
+
+        ui.messageBox('¡Bases individuales generadas! Protoboard y ESP32 tienen encajes separados en la bandeja, y la potencia en el piso.')
+
+    except:
+        if ui:
+            ui.messageBox('Error:\n{}'.format(traceback.format_exc()))
