@@ -1,0 +1,53 @@
+Telegraf como Agente de Ingesta, InfluxDB y Consultas Flux
+
+Repositorio correspondiente a la Guía de Taller 5 (GT5) de Fundamentos de IoT. Este documento detalla la arquitectura de persistencia, el modelo de datos y las consultas de series temporales asociadas al proyecto del equipo.
+
+
+  1. Integrantes del Equipo
+* **Equipo:** E08[cite: 12]
+* **Proyecto:** P02 (Monitor de calidad de aire y ruido del campus)[cite: 12]
+* **Nodo:** nodo1[cite: 12]
+
+  2. Ruta de Ingesta de Datos
+La persistencia de los datos del ESP32 hacia la base de datos histórica se realiza a través del siguiente flujo continuo:
+ESP32 ---> Mosquitto (MQTT) ---> Telegraf ---> InfluxDB ---> Grafana
+
+
+1. **ESP32:** Publica las lecturas de los sensores periódicamente al broker MQTT utilizando un tópico estructurado de 4 niveles (`curso/E08/P02/nodo1`)[cite: 2, 6, 12].
+2. **Mosquitto:** Broker MQTT institucional que recibe los mensajes publicados por el kit del proyecto[cite: 6].
+3. **Telegraf:** Agente de ingesta . Utiliza `topic_parsing` para descomponer automáticamente los niveles del tópico y transformar los identificadores en **tags**, interpretando el payload JSON para guardarlo como **fields**[cite: 6].
+4. **InfluxDB:** Base de datos de series temporales donde Telegraf almacena los datos bajo una organización y un bucket comunes[cite: 2, 6].
+5. **Grafana Explore:** Entorno de consulta visual conectado al datasource de InfluxDB, utilizado para ejecutar consultas en lenguaje **Flux** sin exponer credenciales de infraestructura[cite: 2, 7].
+
+  3. Modelo de Datos en InfluxDB
+
+* **Organización:** `curso-iot`[cite: 6, 12]
+* **Bucket:** `mediciones` (Compartido por todos los equipos del curso)[cite: 6, 12]
+* **Measurement:** `mediciones` (Definido globalmente en el agente)[cite: 6, 12]
+
+### Tags Estructurales (Identificadores)
+Sirven para filtrar la serie temporal de forma eficiente sin alta cardinalidad:
+* `equipo` = `"E08"`[cite: 6, 12]
+* `proyecto` = `"P02"`[cite: 6, 12]
+* `nodo` = `"nodo1"`[cite: 12]
+* `topic` = `"curso/E08/P02/nodo1"` *(Tag auxiliar generado por el parser)*[cite: 6, 12]
+
+ Fields del Proyecto
+Valores numéricos y estados que cambian en cada muestra recolectada por los sensores:
+* `ciclo`[cite: 12]
+* `max_co2`[cite: 12]
+* `min_co2`[cite: 12]
+* `mediana_co2`[cite: 12]
+* `max_ruido`[cite: 12]
+* `min_ruido`[cite: 12]
+* `mediana_ruido`[cite: 12]
+
+  4. Consultas Flux Implementadas
+
+En este repositorio se encuentran almacenados los siguientes archivos con consultas para la explotación de los datos:
+1. **`q1_ultimo.flux`**: Obtiene el valor más reciente del field principal (`last()`) dentro de la última hora[cite: 3].
+2. **`q2_promedio5m.flux`**: Calcula el promedio agregado por ventanas temporales de 5 minutos (`aggregateWindow`) de la métrica principal[cite: 3].
+3. **`q3_propia.flux`**: Consulta personalizada orientada a responder una pregunta específica de monitoreo del proyecto de calidad de aire y ruido[cite: 3].
+
+  5. Muestra de Datos Crudos
+Archivo `data_sample.csv`, el cual contiene una exportación de la serie cruda una toma una sola muestra de datos obtenida directamente desde el inspector de Grafana Explore aplicando los filtros correspondientes al equipo, proyecto y nodo[cite: 3].
