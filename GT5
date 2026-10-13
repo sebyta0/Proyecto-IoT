@@ -25,7 +25,7 @@ ESP32 ---> Mosquitto (MQTT) ---> Telegraf ---> InfluxDB ---> Grafana
 * **Bucket:** `mediciones` (Compartido por todos los equipos del curso)[cite: 6, 12]
 * **Measurement:** `mediciones` (Definido globalmente en el agente)[cite: 6, 12]
 
-### Tags Estructurales (Identificadores)
+ Tags Estructurales 
 Sirven para filtrar la serie temporal de forma eficiente sin alta cardinalidad:
 * `equipo` = `"E08"`[cite: 6, 12]
 * `proyecto` = `"P02"`[cite: 6, 12]
@@ -50,4 +50,4 @@ En este repositorio se encuentran almacenados los siguientes archivos con consul
 3. **`q3_propia.flux`**: Consulta personalizada orientada a responder una pregunta específica de monitoreo del proyecto de calidad de aire y ruido[cite: 3].
 
   5. Muestra de Datos Crudos
-Archivo `data_sample.csv`, el cual contiene una exportación de la serie cruda una toma una sola muestra de datos obtenida directamente desde el inspector de Grafana Explore aplicando los filtros correspondientes al equipo, proyecto y nodo[cite: 3].
+Archivo `data_sample.csv`, contiene una exportación una toma una sola muestra de datos obtenida directamente desde el inspector de Grafana Explore aplicando los filtros correspondientes al equipo, proyecto y nodo[cite: 3].
