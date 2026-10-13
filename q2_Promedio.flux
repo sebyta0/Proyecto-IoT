@@ -1,0 +1,7 @@
+from(bucket: "mediciones")
+  |> range(start: -1h)
+  |> filter(fn: (r) => r ._ measurement == "mediciones")
+  |> filter(fn: (r) => r.equipo == "E08" and r.proyecto == "P02" and r.nodo == "nodo1")
+  |> filter(fn: (r) => r ._ field == "mediana_co2")
+  |> aggregateWindow(every: 5m, fn: mean, createEmpty: false)
+  |>yield(name: "promedio_5m")
