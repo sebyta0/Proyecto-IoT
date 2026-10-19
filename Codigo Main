@@ -1,0 +1,567 @@
+#include <Arduino.h>
+#include <WiFi.h>
+#include <PubSubClient.h>
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+#include <esp_sleep.h>
+#include <time.h>
+#include <driver/rtc_io.h>
+
+#include "config.h"
+
+// ==========================================================
+// 3. PANTALLA OLED
+// ==========================================================
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
+
+const uint8_t MAX_MUESTRAS = 15;
+float ventana[MAX_MUESTRAS];
+uint8_t muestras_validas = 0;
+uint8_t indice_ventana = 0;
+
+float cuentas_a_fisica(int cuentas) {
+  return ((V_REF * cuentas) / CUENTAS_MAX) * ESCALA_SENSOR + OFFSET_SENSOR;
+}
+
+float aplicar_calibracion(float valor_medido) {
+  return M_CAL * valor_medido + B_CAL;
+}
+
+float mediana() {
+  if (muestras_validas == 0) return OFFSET_SENSOR;
+  float copia[MAX_MUESTRAS];
+  for (uint8_t i = 0; i < muestras_validas; i++) copia[i] = ventana[i];
+  for (uint8_t i = 1; i < muestras_validas; i++) {
+    float clave = copia[i];
+    int8_t j = i - 1;
+    while (j >= 0 && copia[j] > clave) { copia[j + 1] = copia[j]; j--; }
+    copia[j + 1] = clave;
+  }
+  return copia[muestras_validas / 2];
+}
+
+// ==========================================================
+// 5. MÁQUINA DE ESTADOS PRINCIPAL Y TIEMPOS (FSM)
+// ==========================================================
+enum EstadoSistema : uint8_t { CALENTANDO, MONITOREANDO, ALERTA_RUIDO, ALERTA_CO2, ERROR_SEGURO };
+EstadoSistema estadoActual = CALENTANDO;
+
+const uint32_t TIEMPO_CALENTAMIENTO_MS = 240000;
+const uint32_t TIEMPO_ACTIVO_MS = 180000;
+
+uint32_t tiempoInicioActividad = 0;
+uint32_t tiempoAnteriorMuestreo = 0;
+uint32_t tiempoAnteriorPantalla = 0;
+uint32_t t_entrada = 0;
+
+// --- VARIABLES MUESTREO ASÍNCRONO ---
+uint8_t pasoMuestreo = 0;
+uint32_t t_paso = 0;
+int max_val_audio = 0;
+int min_val_audio = 4095;
+
+int ruidoActual = 0;
+float aireActual = 0.0;
+
+const int MAX_MUESTRAS_RUIDO = 500;
+int arregloRuido[MAX_MUESTRAS_RUIDO];
+int contadorMuestras = 0;
+int ruidoMediana = 0;
+
+float co2_maximo = 0.0;
+float co2_minimo = 9999.0;
+int ruido_maximo = 0;
+int ruido_minimo = 9999;
+
+uint8_t lecturasInvalidas = 0;
+
+RTC_DATA_ATTR bool alertaRuidoEnviada = false;
+RTC_DATA_ATTR bool alertaCO2Enviada = false;
+RTC_DATA_ATTR uint32_t contadorCiclos = 0;
+
+bool wifiDisponible = false;
+
+// ==========================================================
+// 5b. MÁQUINA DE ESTADOS DE CIERRE (NO BLOQUEANTE)
+// ==========================================================
+enum EstadoCierre : uint8_t {
+  CIERRE_NINGUNO,
+  CIERRE_PUBLICAR_RESUMEN,
+  CIERRE_ESPERA_MQTT,
+  CIERRE_ESPERA_PANTALLA,
+  CIERRE_DORMIR_YA
+};
+EstadoCierre estadoCierre = CIERRE_NINGUNO;
+uint32_t t_cierre = 0;
+
+WiFiClient espClient;
+PubSubClient client(espClient);
+
+// --- FUNCIÓN CALLBACK PARA RECIBIR COMANDOS DESDE NODE-RED ---
+void callback(char* topic, byte* payload, unsigned int length) {
+  String mensaje = "";
+  for (int i = 0; i < length; i++) {
+    mensaje += (char)payload[i];
+  }
+
+  Serial.print("Comando recibido en topico: ");
+  Serial.println(topic);
+  Serial.print("Mensaje: ");
+  Serial.println(mensaje);
+
+  // Verificamos si el tópico coincide con nuestro tópico de comandos
+  if (String(topic) == topico_cmd) {
+    if (mensaje == "ping") {
+      Serial.println("¡PING recibido! Respondiendo con estado de WiFi...");
+      
+      // 1. Obtener la intensidad de la señal WiFi (RSSI)
+      int senal_wifi = WiFi.RSSI();
+      
+      // 2. Armar el JSON de respuesta (ACTUALIZADO A FORMATO NUMÉRICO)
+      String respuesta = "{\"estado\":1, \"wifi_rssi\":" + String(senal_wifi) + "}";
+      
+      // 3. Publicar la respuesta en el tópico de estado
+      client.publish(topico_estado, respuesta.c_str(), false);
+      
+      // 4. Limpiar el comando retenido en el broker publicando un mensaje vacío
+      client.publish(topico_cmd, "", true);
+    }
+  }
+}
+
+void cambiar(EstadoSistema e) {
+  estadoActual = e;
+  t_entrada = millis();
+  Serial.printf("[%lu ms] -> estado %u\n", millis(), (unsigned)e);
+}
+
+bool leerBotonFuerzaEnvio() {
+  static uint32_t t_ultimo_boton = 0;
+  if (digitalRead(pinBoton) == HIGH && (millis() - t_ultimo_boton >= 50)) {
+    t_ultimo_boton = millis();
+    return true;
+  }
+  return false;
+}
+
+// --- ESCUDO 1: CONEXIÓN MQTT SEGURA Y NO BLOQUEANTE ---
+void reconectarMQTT() {
+  // Si no hay WiFi físico, abortar de inmediato para no congelar el ESP32
+  if (WiFi.status() != WL_CONNECTED) return; 
+
+  if (!client.connected()) {
+    // Intentar reconectar a MQTT solo cada 5 segundos
+    static uint32_t ultimoIntentoMQTT = 0;
+    if (millis() - ultimoIntentoMQTT >= 5000) {
+      ultimoIntentoMQTT = millis();
+      // ACTUALIZADO CON CREDENCIALES
+      if (client.connect(mqtt_client_id, mqtt_user, mqtt_pass)) {
+        Serial.println("Conectado al Broker MQTT (HiveMQ)");
+        client.subscribe(topico_cmd);
+        Serial.println("Suscrito a comandos Node-RED.");
+      }
+    }
+  }
+}
+
+bool conectarWiFi() {
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(ssid, password);
+  uint32_t t0 = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - t0 < WIFI_TIMEOUT_MS) {
+    delay(500);
+  }
+  return WiFi.status() == WL_CONNECTED;
+}
+
+// ==========================================================
+// 6. SETUP
+// ==========================================================
+void setup() {
+  Serial.begin(115200);
+
+  contadorCiclos++;
+  Serial.printf("Ciclo de despertar #%lu\n", (unsigned long)contadorCiclos);
+
+  pinMode(pinAire, INPUT_PULLDOWN);
+  pinMode(pinRuidoAnalog, INPUT_PULLDOWN);
+  pinMode(pinBoton, INPUT_PULLDOWN);
+  pinMode(pinLed, OUTPUT);
+  pinMode(pinRele, OUTPUT);
+
+  digitalWrite(pinRele, RELE_ENCENDIDO);
+
+  if (display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
+    display.clearDisplay();
+    display.display();
+  }
+
+  client.setCallback(callback);
+
+  WiFi.mode(WIFI_OFF);
+  tiempoInicioActividad = millis();
+}
+
+// ==========================================================
+// 7. LOOP PRINCIPAL NO BLOQUEANTE
+// ==========================================================
+void loop() {
+  uint32_t ahora = millis();
+
+  // --------------------------------------------------------
+  // FASE 1: CALENTAMIENTO (4 MINUTOS)
+  // --------------------------------------------------------
+  if (estadoActual == CALENTANDO) {
+    if (ahora - tiempoAnteriorPantalla >= 1000) {
+      tiempoAnteriorPantalla = ahora;
+      int segundosRestantes = (TIEMPO_CALENTAMIENTO_MS - (ahora - tiempoInicioActividad)) / 1000;
+
+      display.clearDisplay();
+      display.setTextSize(1);
+      display.setTextColor(SSD1306_WHITE);
+      display.setCursor(0, 10);
+      display.println(F("Calentando MQ-135..."));
+      display.println(F("WiFi APAGADO"));
+      display.setTextSize(3);
+      display.setCursor(30, 35);
+      display.print(segundosRestantes);
+      display.display();
+    }
+
+    if (ahora - tiempoInicioActividad >= TIEMPO_CALENTAMIENTO_MS) {
+      display.clearDisplay(); display.setTextSize(1); display.setCursor(0, 20);
+      display.println(F("Conectando WiFi...")); display.display();
+
+      wifiDisponible = conectarWiFi();
+
+      if (wifiDisponible) {
+        configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
+        client.setServer(mqtt_server, mqtt_port);
+      } else {
+        display.clearDisplay(); display.setTextSize(1); display.setCursor(0, 20);
+        display.println(F("Sin WiFi."));
+        display.println(F("Monitoreo local"));
+        display.display();
+        delay(1500); 
+      }
+
+      cambiar(MONITOREANDO);
+      tiempoInicioActividad = millis();
+    }
+  }
+  // --------------------------------------------------------
+  // FASE 2: MUESTREO Y ALERTAS (100% ASÍNCRONO)
+  // --------------------------------------------------------
+  else if (estadoCierre == CIERRE_NINGUNO) { 
+    
+    // ESCUDO 2 y 3: Solo procesar MQTT si físicamente hay conexión al router
+    if (wifiDisponible) {
+      if (WiFi.status() == WL_CONNECTED) { 
+        reconectarMQTT();
+        client.loop();
+      }
+    }
+
+    // --- MÁQUINA DE ESTADOS DE MUESTREO SENSORIAL ---
+    switch (pasoMuestreo) {
+      case 0:
+        if (ahora - tiempoAnteriorMuestreo >= 500) {
+          tiempoAnteriorMuestreo = ahora;
+          analogRead(pinRuidoAnalog); // Lectura Basura (limpia canal)
+          t_paso = ahora;
+          pasoMuestreo = 1;
+        }
+        break;
+
+      case 1: // Espera de 2ms para asentar el ADC en el pin de audio
+        if (ahora - t_paso >= 2) {
+          max_val_audio = 0;
+          min_val_audio = 4095;
+          t_paso = ahora;
+          pasoMuestreo = 2;
+        }
+        break;
+
+      case 2: // Ventana de 50ms capturando la onda de sonido
+        {
+          int val = analogRead(pinRuidoAnalog);
+          if (val > max_val_audio) max_val_audio = val;
+          if (val < min_val_audio) min_val_audio = val;
+
+          if (ahora - t_paso >= 50) {
+            analogRead(pinAire); // Lectura Basura (mueve el ADC al pin de gas)
+            t_paso = ahora;
+            pasoMuestreo = 3;
+          }
+        }
+        break;
+
+      case 3: // Espera de 2ms para asentar el ADC en el pin de gas y procesar todo
+        if (ahora - t_paso >= 2) {
+          int amplitudSonido = max_val_audio - min_val_audio;
+          int adcAire = analogRead(pinAire); 
+
+          // --- FAILSAFE Y PROCESAMIENTO ---
+          if (adcAire < 5) {
+            lecturasInvalidas++;
+          } else {
+            lecturasInvalidas = 0;
+            if (estadoActual == ERROR_SEGURO) cambiar(MONITOREANDO);
+          }
+
+          if (lecturasInvalidas >= 6 && estadoActual != ERROR_SEGURO) {
+            cambiar(ERROR_SEGURO);
+          }
+
+          if (estadoActual != ERROR_SEGURO) {
+            // LECTURA DIRECTA DE RUIDO
+            ruidoActual = map(amplitudSonido, 0, 4095, 30, 500);
+
+            if (contadorMuestras < MAX_MUESTRAS_RUIDO) {
+              arregloRuido[contadorMuestras] = ruidoActual;
+              contadorMuestras++;
+            }
+
+            if (ruidoActual > ruido_maximo) ruido_maximo = ruidoActual;
+            if (ruidoActual < ruido_minimo) ruido_minimo = ruidoActual;
+
+            float aireCrudo = aplicar_calibracion(cuentas_a_fisica(adcAire));
+            ventana[indice_ventana] = aireCrudo;
+            indice_ventana = (indice_ventana + 1) % MAX_MUESTRAS;
+            if (muestras_validas < MAX_MUESTRAS) muestras_validas++;
+
+            aireActual = mediana();
+
+            if (aireActual > co2_maximo) co2_maximo = aireActual;
+            if (aireActual < co2_minimo) co2_minimo = aireActual;
+
+            // ALERTAS MQTT
+            if (ruidoActual >= 80) {
+              if (!alertaRuidoEnviada) {
+                if (wifiDisponible && WiFi.status() == WL_CONNECTED) {
+                  String payloadRuido = "{\"alerta\":\"Ruido\",\"valor\":" + String(ruidoActual) + "}";
+                  client.publish(topico_alerta, payloadRuido.c_str());
+                }
+                alertaRuidoEnviada = true;
+              }
+              if (estadoActual != ALERTA_RUIDO) cambiar(ALERTA_RUIDO);
+            } else if (ruidoActual <= 75) {
+              alertaRuidoEnviada = false;
+            }
+
+            if (aireActual >= 700.0) {
+              if (!alertaCO2Enviada) {
+                if (wifiDisponible && WiFi.status() == WL_CONNECTED) {
+                  String payloadAire = "{\"alerta\":\"Aire\",\"valor\":" + String(aireActual) + "}";
+                  client.publish(topico_alerta, payloadAire.c_str());
+                }
+                alertaCO2Enviada = true;
+              }
+              if (estadoActual == MONITOREANDO) cambiar(ALERTA_CO2);
+            } else if (aireActual <= 600.0) {
+              alertaCO2Enviada = false;
+            }
+
+            if (ruidoActual <= 75 && aireActual <= 600.0 && estadoActual != MONITOREANDO) {
+              cambiar(MONITOREANDO);
+            }
+          }
+          pasoMuestreo = 0; // Termina el proceso hasta el próximo ciclo de 500ms
+        }
+        break;
+    } // Fin del Switch de Muestreo
+
+    // ACTUALIZACIÓN DE PANTALLA
+    if (ahora - tiempoAnteriorPantalla >= 1000) {
+      tiempoAnteriorPantalla = ahora;
+
+      display.clearDisplay();
+
+      if (estadoActual == ERROR_SEGURO) {
+        display.setTextSize(2);
+        display.setCursor(0, 10);
+        display.println(F("ERROR!"));
+        display.setTextSize(1);
+        display.println(F("Cable Suelto"));
+      } else {
+        display.setTextSize(1);
+        display.setCursor(0, 0);
+        display.print(F("RUIDO:"));
+        display.setTextSize(2);
+        display.setCursor(0, 10);
+        display.print(ruidoActual);
+        display.println(F(" dB"));
+
+        display.setTextSize(1);
+        display.setCursor(0, 32);
+        display.print(F("AIRE (CO2):"));
+        display.setTextSize(2);
+        display.setCursor(0, 42);
+        display.print(aireActual, 0);
+        display.println(F(" PPM"));
+
+        if (!wifiDisponible || WiFi.status() != WL_CONNECTED) {
+          display.setTextSize(1);
+          display.setCursor(90, 0);
+          display.print(F("[sin wifi]"));
+        }
+      }
+
+      display.display();
+    }
+
+    switch (estadoActual) {
+      case MONITOREANDO:
+        digitalWrite(pinLed, LOW);
+        break;
+      case ALERTA_RUIDO:
+      case ALERTA_CO2:
+        digitalWrite(pinLed, HIGH);
+        break;
+      case ERROR_SEGURO:
+        digitalWrite(pinLed, HIGH);
+        break;
+      case CALENTANDO:
+        break;
+    }
+  }
+
+  // --------------------------------------------------------
+  // D. CIERRE DE CICLO Y DEEP SLEEP — MÁQUINA DE ESTADOS NO BLOQUEANTE
+  // --------------------------------------------------------
+  ahora = millis();
+  bool terminoCiclo = (estadoActual != CALENTANDO) && (ahora - tiempoInicioActividad >= TIEMPO_ACTIVO_MS);
+
+  if (estadoCierre == CIERRE_NINGUNO && (terminoCiclo || leerBotonFuerzaEnvio())) {
+    estadoCierre = CIERRE_PUBLICAR_RESUMEN;
+  }
+
+  switch (estadoCierre) {
+
+    case CIERRE_NINGUNO:
+      break;
+
+    case CIERRE_PUBLICAR_RESUMEN: {
+      if (!wifiDisponible) {
+        display.clearDisplay(); display.setCursor(0, 10); display.setTextSize(1);
+        display.print(F("Reintentando WiFi...")); display.display();
+        wifiDisponible = conectarWiFi();
+        if (wifiDisponible) {
+          configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
+          client.setServer(mqtt_server, mqtt_port);
+          reconectarMQTT();
+        }
+      } else if (WiFi.status() != WL_CONNECTED) {
+        // ACTUALIZAR PANTALLA para que no parezca que está pegado
+        display.clearDisplay(); display.setCursor(0, 10); display.setTextSize(1);
+        display.print(F("Recuperando WiFi...")); display.display();
+        
+        wifiDisponible = conectarWiFi();
+        if (wifiDisponible) reconectarMQTT();
+      }
+
+      if (contadorMuestras > 0) {
+        for (int i = 0; i < contadorMuestras - 1; i++) {
+          for (int j = 0; j < contadorMuestras - i - 1; j++) {
+            if (arregloRuido[j] > arregloRuido[j + 1]) {
+              int temporal = arregloRuido[j];
+              arregloRuido[j] = arregloRuido[j + 1];
+              arregloRuido[j + 1] = temporal;
+            }
+          }
+        }
+        int mitad = contadorMuestras / 2;
+        if (contadorMuestras % 2 == 0) { ruidoMediana = (arregloRuido[mitad - 1] + arregloRuido[mitad]) / 2; }
+        else { ruidoMediana = arregloRuido[mitad]; }
+      } else { ruidoMediana = 0; }
+      contadorMuestras = 0;
+
+      float min_co2_final = (co2_minimo == 9999.0) ? 0.0 : co2_minimo;
+      int min_ruido_final = (ruido_minimo == 9999) ? 0 : ruido_minimo;
+
+      String payload = "{\"ciclo\":" + String(contadorCiclos) +
+                       ",\"mediana_co2\":" + String(aireActual) +
+                       ",\"max_co2\":" + String(co2_maximo) +
+                       ",\"min_co2\":" + String(min_co2_final) +
+                       ",\"mediana_ruido\":" + String(ruidoMediana) +
+                       ",\"max_ruido\":" + String(ruido_maximo) +
+                       ",\"min_ruido\":" + String(min_ruido_final) + "}";
+
+      if (wifiDisponible && WiFi.status() == WL_CONNECTED) {
+        client.publish(topico_resumen, payload.c_str());
+      } else {
+        Serial.println("Sin WiFi: resumen del ciclo no enviado.");
+      }
+
+      t_cierre = millis();
+      estadoCierre = CIERRE_ESPERA_MQTT;
+      break;
+    }
+
+    case CIERRE_ESPERA_MQTT:
+      if (wifiDisponible && WiFi.status() == WL_CONNECTED) client.loop();
+      if (millis() - t_cierre >= 500) {
+        digitalWrite(pinRele, RELE_APAGADO);
+        digitalWrite(pinLed, LOW);
+
+        struct tm timeinfo;
+        String textoDespertar = "--:--";
+        if (wifiDisponible && getLocalTime(&timeinfo)) {
+          time_t ahora_epoch;
+          time(&ahora_epoch);
+          ahora_epoch += (53 * 60);
+          struct tm *horaFutura = localtime(&ahora_epoch);
+          char buffer[6];
+          sprintf(buffer, "%02d:%02d", horaFutura->tm_hour, horaFutura->tm_min);
+          textoDespertar = String(buffer);
+        }
+
+        display.clearDisplay(); display.setTextSize(1); display.setCursor(0, 10);
+        if (wifiDisponible && WiFi.status() == WL_CONNECTED) {
+          display.println(F("Datos Enviados!"));
+        } else {
+          display.println(F("Sin conexion."));
+          display.println(F("Datos no enviados"));
+        }
+        display.println(F("Despierta a las:"));
+        display.setTextSize(3); display.setCursor(20, 35); display.print(textoDespertar);
+        display.display();
+
+        t_cierre = millis();
+        estadoCierre = CIERRE_ESPERA_PANTALLA;
+      }
+      break;
+
+    case CIERRE_ESPERA_PANTALLA:
+      if (millis() - t_cierre >= 4000) {
+        estadoCierre = CIERRE_DORMIR_YA;
+      }
+      break;
+
+    case CIERRE_DORMIR_YA:
+      display.ssd1306_command(SSD1306_DISPLAYOFF);
+
+      client.disconnect();
+      WiFi.disconnect(true);
+
+      rtc_gpio_pullup_dis(GPIO_NUM_25);
+      rtc_gpio_pulldown_en(GPIO_NUM_25);
+      
+      // --- CÁLCULO ESTRICTO DE 64 BITS PARA 53 MINUTOS ---
+      {
+        uint64_t minutos_a_dormir = 53;
+        uint64_t tiempo_microsegundos = minutos_a_dormir * 60ULL * 1000000ULL;
+        esp_sleep_enable_timer_wakeup(tiempo_microsegundos);
+      }
+      
+      esp_sleep_enable_ext0_wakeup(GPIO_NUM_25, 1);
+      alertaRuidoEnviada = false;
+      alertaCO2Enviada = false;
+
+      esp_deep_sleep_start();
+      break;
+  }
+}
