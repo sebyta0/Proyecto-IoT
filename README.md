@@ -62,15 +62,15 @@ https://drive.google.com/file/d/1pJf0zCyYcQ-HjyvcMk9zZ4_aJ8U5O6kv/view?usp=shari
 // ==========================================================
 
 
-const char* ssid = "Pichulaperro";
-const char* password = "chaparritoUA";
-const char* mqtt_server = "broker.hivemq.com";
-const int mqtt_port = 1883;
+const char* ssid = "";
+const char* password = "";
+const char* mqtt_server = "";
+const int mqtt_port = ;
 
 const char* topico_alerta = "curso/e08/p2/alertas";
 const char* topico_resumen = "curso/e08/p2/nodo1";
 
-const char* ntpServer = "pool.ntp.org";
+const char* ntpServer = "";
 const long  gmtOffset_sec = -14400;    // Zona Horaria de Chile (ajusta si hay cambio de hora)
 const int   daylightOffset_sec = 3600; 
 
