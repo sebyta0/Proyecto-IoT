@@ -5,17 +5,17 @@
 // 1. CONFIGURACIÓN RED Y MQTT (Red de la Universidad)
 // ==========================================================
 // ¡ATENCIÓN!: Rellenar con los datos del laboratorio
-const char* ssid = "IoT-Lab"; 
-const char* password = "iot2026est"; 
-const char* mqtt_server = "10.0.0.10"; // Ya no es HiveMQ, usa la IP local
-const int mqtt_port = 1883;
+const char* ssid = ""; 
+const char* password = ""; 
+const char* mqtt_server = ""; // Ya no es HiveMQ, usa la IP local
+const int mqtt_port = ;
 
 // --- CREDENCIALES PROPIAS DEL EQUIPO ---
 // La ACL del servidor limita tu acceso a tu propio prefijo
-const char* mqtt_user = "E08"; // Tu usuario MQTT asignado
-const char* mqtt_pass = "Mf89DdDPHmR1"; // Tu clave MQTT asignada
+const char* mqtt_user = ""; // Tu usuario MQTT asignado
+const char* mqtt_pass = ""; // Tu clave MQTT asignada
 
-const char* mqtt_client_id = "E08-nodo1"; 
+const char* mqtt_client_id = ""; 
 
 // --- TÓPICOS ESTRICTOS DE LA ASIGNATURA ---
 // Regla clave: Las mayúsculas importan (E08 ≠ e08).
