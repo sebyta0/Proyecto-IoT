@@ -46,6 +46,7 @@ Video de circuito en funcionamiento:
 https://drive.google.com/file/d/1pJf0zCyYcQ-HjyvcMk9zZ4_aJ8U5O6kv/view?usp=sharing
 
 --- GT6 ---
+
 a) El umbral definido es de 700 ppm para CO2 y 80 dB para ruido. Estos valores provienen formalmente del charter del proyecto y funcionan como condición de transición en la máquina de estados (FSM) establecida en la GT2.
 b) La desviación estándar observada (σ) para el sensor MQ-135 es de 2.8 ppm respecto a una media estable de operación normal de 447.2 ppm. El margen entre el valor normal (447.2 ppm) y el umbral de alerta (700 ppm) es de 252.8 ppm. Expresado en múltiplos, este margen equivale a aproximadamente 90.28 σ (252.8 / 2.8). Esta amplitud previene falsos positivos derivados del ruido eléctrico del sensor.
 c) El tiempo pendiente (for) de 2 minutos es adecuado porque la acumulación de CO2 en un entorno cerrado es un fenómeno de dinámicas lentas. Exigir 2 minutos sostenidos sobre los 700 ppm filtra eventos transitorios (como una exhalación humana directa y momentánea sobre el sensor), garantizando así que la alerta responda a un ambiente viciado.
